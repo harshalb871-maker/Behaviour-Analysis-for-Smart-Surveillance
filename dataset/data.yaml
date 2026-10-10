@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 5
+names: ['Rifle', 'knife', 'pistol', 'shot-gun', 'submachine-gun']
+
+roboflow:
+  workspace: weapon-detect-qbsiw
+  project: yolo-weapon-detection
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/weapon-detect-qbsiw/yolo-weapon-detection/dataset/1

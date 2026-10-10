@@ -18,4 +18,4 @@ class Config:
     
     # App Settings
     APP_NAME = "Smart Surveillance"
-    MODEL_PATH = os.path.join(MODELS_DIR, "best.pt")
+    MODEL_PATH = os.path.join(MODELS_DIR, "yolov8n.pt")
