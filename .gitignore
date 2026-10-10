@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment
+.env
+
+# Logs
+logs/
+*.log
+
+# YOLO models
+*.pt
+
+# Virtual environment
+venv/
+.venv/
