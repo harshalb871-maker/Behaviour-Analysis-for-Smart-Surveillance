@@ -1,4 +1,5 @@
-import os
+"""Email alerts with evidence images and a per-class cooldown."""
+
 import smtplib
 import threading
 import time
@@ -12,140 +13,88 @@ from config import Config
 from logger import logger
 
 
-# Keep the original function available for existing imports/calls.
-def send_alert_email(subject, body, image_path=None):
-    """Send a simple email using credentials from config.py.
+def send_alert_email(subject, body, image_path=None, receiver=None):
+    """Send an email using .env credentials; return True only on success."""
+    sender = Config.EMAIL_SENDER
+    password = Config.EMAIL_PASSWORD
+    recipient = (receiver or Config.EMAIL_RECEIVER).strip()
 
-    If image_path is provided and exists, attach the image.
-    """
-    sender = getattr(Config, "EMAIL_SENDER", None)
-    password = getattr(Config, "EMAIL_PASSWORD", None)
-    receiver = getattr(Config, "EMAIL_RECEIVER", None)
-
-    if not sender or not password or not receiver:
-        logger.warning(
-            "Email credentials or receiver are not configured in Config."
-        )
+    if not sender or not password or not recipient:
+        logger.warning("Email not sent: sender, app password, or recipient is missing.")
         return False
 
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = sender
-    message["To"] = receiver
+    message["To"] = recipient
     message.set_content(body)
 
-    if image_path and os.path.isfile(image_path):
+    if image_path:
         path = Path(image_path)
-        # The evidence frames are saved as JPEG files by AlertSystem.
-        suffix = path.suffix.lower()
-        subtype = "png" if suffix == ".png" else "jpeg"
+        if not path.is_file():
+            logger.warning("Evidence image does not exist: %s", path)
+            return False
+        subtype = "png" if path.suffix.lower() == ".png" else "jpeg"
         with path.open("rb") as image_file:
             message.add_attachment(
-                image_file.read(),
-                maintype="image",
-                subtype=subtype,
-                filename=path.name,
+                image_file.read(), maintype="image", subtype=subtype, filename=path.name
             )
 
     try:
+        # Gmail requires an app password when 2-Step Verification is enabled.
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
             smtp.login(sender, password)
             smtp.send_message(message)
-        logger.info("Alert email sent successfully.")
+        logger.info("Alert email sent to %s", recipient)
         return True
-    except Exception as error:
-        logger.exception("Failed to send alert email: %s", error)
+    except Exception:
+        logger.exception("Failed to send alert email.")
         return False
 
 
 class AlertSystem:
-    """Save an annotated frame and email it without blocking the GUI.
-
-    Args:
-        cooldown: Minimum seconds between alerts for the same detected class.
-        alert_folder: Optional evidence directory. Defaults to project/alerts.
-    """
+    """Save evidence and send email on a worker thread without blocking Tkinter."""
 
     def __init__(self, cooldown=10, alert_folder=None):
-        project_folder = Path(__file__).resolve().parent
-        self.alert_folder = (
-            Path(alert_folder) if alert_folder else project_folder / "alerts"
-        )
+        Config.ensure_directories()
+        self.alert_folder = Path(alert_folder) if alert_folder else Config.ALERTS_DIR
         self.alert_folder.mkdir(parents=True, exist_ok=True)
-
-        self.cooldown = max(0, float(cooldown))
+        self.cooldown = max(0.0, float(cooldown))
         self.last_alert_time = {}
         self.lock = threading.Lock()
 
-    def send_email(self, recipient, class_name, confidence, image_path):
-        """Send an alert email with the captured evidence attached."""
-        sender = getattr(Config, "EMAIL_SENDER", None)
-        password = getattr(Config, "EMAIL_PASSWORD", None)
-
-        if not sender or not password:
-            raise ValueError(
-                "Configure EMAIL_SENDER and EMAIL_PASSWORD in config.py."
-            )
-        if not recipient or not recipient.strip():
-            raise ValueError("A recipient email address is required.")
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        message = EmailMessage()
-        message["Subject"] = f"Surveillance Alert: {class_name}"
-        message["From"] = sender
-        message["To"] = recipient.strip()
-        message.set_content(
-            "An object configured for alerts was detected.\n\n"
-            f"Class: {class_name}\n"
-            f"Confidence: {confidence:.2%}\n"
-            f"Time: {timestamp}\n\n"
-            "Please review the attached image."
-        )
-
-        image_file_path = Path(image_path)
-        suffix = image_file_path.suffix.lower()
-        subtype = "png" if suffix == ".png" else "jpeg"
-        with image_file_path.open("rb") as image_file:
-            message.add_attachment(
-                image_file.read(),
-                maintype="image",
-                subtype=subtype,
-                filename=image_file_path.name,
-            )
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
-            smtp.login(sender, password)
-            smtp.send_message(message)
-
-        logger.info("Alert email sent for class '%s'.", class_name)
+    @staticmethod
+    def email_is_configured(recipient):
+        return bool(Config.EMAIL_SENDER and Config.EMAIL_PASSWORD and recipient and recipient.strip())
 
     def trigger_alert(self, recipient, class_name, confidence, frame):
-        """Queue an alert; returns (success, message) immediately."""
-        if not recipient or not recipient.strip():
-            return False, "Enter a recipient email address."
+        """Save evidence and queue an email; return immediately with a status."""
+        if not self.email_is_configured(recipient):
+            return False, "Email settings are incomplete; configure .env and receiver email."
         if frame is None:
             return False, "No frame was provided for the alert."
 
-        now = time.time()
+        class_name = str(class_name)
+        now = time.monotonic()
         with self.lock:
-            previous = self.last_alert_time.get(class_name, 0)
-            if now - previous < self.cooldown:
-                return False, "Alert skipped: cooldown active."
-            # Reserve the cooldown before starting the worker thread.
+            previous = self.last_alert_time.get(class_name)
+            if previous is not None and now - previous < self.cooldown:
+                return False, "Cooldown active."
+
+            # Reserve this class's cooldown before starting a worker, avoiding duplicates.
             self.last_alert_time[class_name] = now
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         safe_class = "".join(
-            character if character.isalnum() or character in "-_" else "_"
-            for character in str(class_name)
+            char if char.isalnum() or char in "-_" else "_" for char in class_name
         ) or "detection"
         image_path = self.alert_folder / f"{safe_class}_{timestamp}.jpg"
 
         try:
             saved = cv2.imwrite(str(image_path), frame)
-        except Exception as error:
+        except Exception:
             saved = False
-            logger.exception("Could not save alert evidence: %s", error)
+            logger.exception("Could not save alert evidence.")
 
         if not saved:
             with self.lock:
@@ -156,21 +105,21 @@ class AlertSystem:
             target=self._send_in_background,
             args=(recipient.strip(), class_name, float(confidence), str(image_path)),
             daemon=True,
+            name=f"EmailAlert-{safe_class}",
         )
         worker.start()
-        logger.info("Alert queued for class '%s'.", class_name)
-        return True, f"Alert queued for {class_name}."
+        logger.info("Alert queued: class=%s confidence=%.2f image=%s", class_name, confidence, image_path)
+        return True, f"Alert queued for {class_name}; evidence saved."
 
     def _send_in_background(self, recipient, class_name, confidence, image_path):
-        try:
-            self.send_email(recipient, class_name, confidence, image_path)
-        except Exception as error:
-            logger.exception("Email alert failed for '%s': %s", class_name, error)
-
-
-if __name__ == "__main__":
-    # A simple import/configuration check; this does not send an email.
-    alert_system = AlertSystem()
-    print("email_alert.py loaded successfully.")
-    print(f"Evidence folder: {alert_system.alert_folder}")
-    print("To test sending, call AlertSystem.trigger_alert(...) from your GUI")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        subject = f"Surveillance Alert: {class_name}"
+        body = (
+            "A class recognized by your configured YOLO model was detected.\n\n"
+            f"Class: {class_name}\n"
+            f"Confidence: {confidence:.2%}\n"
+            f"Time: {timestamp}\n\n"
+            "The annotated evidence frame is attached. Review it before taking action."
+        )
+        if not send_alert_email(subject, body, image_path, receiver=recipient):
+            logger.error("Alert email delivery failed for class '%s'.", class_name)

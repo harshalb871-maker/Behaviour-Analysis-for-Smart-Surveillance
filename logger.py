@@ -1,26 +1,31 @@
+"""Application logging to both the console and logs/app.log."""
+
 import logging
-import os
+
 from config import Config
 
+
 def setup_logger():
-    os.makedirs(Config.LOGS_DIR, exist_ok=True)
-    
-    logger = logging.getLogger("AppLogger")
-    logger.setLevel(logging.DEBUG)
-    
-    # Formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    
-    # File Handler
-    fh = logging.FileHandler(os.path.join(Config.LOGS_DIR, 'app.log'))
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-    
-    # Console Handler
-    ch = logging.StreamHandler()
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
-    
-    return logger
+    Config.ensure_directories()
+    app_logger = logging.getLogger("AppLogger")
+    app_logger.setLevel(logging.INFO)
+    app_logger.propagate = False
+
+    # Avoid duplicate messages if setup_logger() is called more than once.
+    if not app_logger.handlers:
+        formatter = logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(message)s"
+        )
+        file_handler = logging.FileHandler(
+            Config.LOGS_DIR / "app.log", encoding="utf-8"
+        )
+        file_handler.setFormatter(formatter)
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        app_logger.addHandler(file_handler)
+        app_logger.addHandler(console_handler)
+
+    return app_logger
+
 
 logger = setup_logger()
