@@ -1,4 +1,4 @@
-"""Tkinter dashboard for webcam/video detection and email alerts."""
+# """Tkinter dashboard for webcam/video detection and email alerts."""
 
 import queue
 import threading

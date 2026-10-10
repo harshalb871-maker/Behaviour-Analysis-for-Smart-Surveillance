@@ -1,4 +1,4 @@
-"""Email alerts with evidence images and a per-class cooldown."""
+# """Email alerts with evidence images and a per-class cooldown."""
 
 import smtplib
 import threading

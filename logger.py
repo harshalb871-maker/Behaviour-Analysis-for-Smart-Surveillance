@@ -1,4 +1,4 @@
-"""Application logging to both the console and logs/app.log."""
+# """Application logging to both the console and logs/app.log."""
 
 import logging
 

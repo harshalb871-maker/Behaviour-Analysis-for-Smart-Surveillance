@@ -1,4 +1,4 @@
-"""Central configuration for the surveillance application."""
+# """Central configuration for the surveillance application."""
 
 import os
 from pathlib import Path
