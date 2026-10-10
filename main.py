@@ -1,31 +1,21 @@
+"""Application entry point."""
+
 import tkinter as tk
+
+from config import Config
 from gui import AppGUI
 from logger import logger
 
 
 def main():
-    logger.info("Starting Application...")
-
+    Config.ensure_directories()
+    logger.info("Starting %s", Config.APP_NAME)
     root = tk.Tk()
-    app = AppGUI(root)
-
-    # Handle clicking the X button
-    root.protocol(
-        "WM_DELETE_WINDOW",
-        lambda: on_closing(root, app)
-    )
-
+    AppGUI(root)
     root.mainloop()
-
-
-def on_closing(root, app):
-    try:
-        app.on_close()
-        logger.info("Application closed.")
-    except Exception as error:
-        logger.exception(f"Error while closing application: {error}")
-        root.destroy()
+    logger.info("Application closed.")
 
 
 if __name__ == "__main__":
     main()
+
