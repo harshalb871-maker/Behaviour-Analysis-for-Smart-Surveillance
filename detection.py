@@ -17,7 +17,7 @@ else:
 
 
 class ObjectDetector:
-    """YOLO detector that returns an annotated frame and generic detections."""
+    # """YOLO detector that returns an annotated frame and generic detections."""
 
     def __init__(self, model_path=None):
         self.model_path = Path(Config.MODEL_PATH if model_path is None else model_path)
@@ -31,7 +31,7 @@ class ObjectDetector:
 
     @property
     def class_names(self):
-        """Return class names supplied by the loaded model, without assumptions."""
+        # Return class names supplied by the loaded model, without assumptions.
         if self.model is None:
             return []
         names = self.model.names
@@ -42,7 +42,7 @@ class ObjectDetector:
     def _load_model(self):
         if YOLO is None:
             self.load_error = (
-                "The Ultralytics package is not installed. Run: pip install -r requirements.txt"
+                # The Ultralytics package is not installed. Run: pip install -r requirements.txt"
             )
             logger.error("%s (%s)", self.load_error, _YOLO_IMPORT_ERROR)
             return
@@ -65,11 +65,11 @@ class ObjectDetector:
             logger.exception(self.load_error)
 
     def process_frame(self, frame, confidence=0.70):
-        """Return (annotated_frame, detections) for one BGR frame.
+        #Return (annotated_frame, detections) for one BGR frame.
 
-        Each detection dictionary has: class, confidence, and box.
-        Confidence is a value from 0.0 to 1.0.
-        """
+       # Each detection dictionary has: class, confidence, and box.
+        #Confidence is a value from 0.0 to 1.0.
+        
         if frame is None:
             raise ValueError("The input frame is empty.")
         if self.model is None:
@@ -106,7 +106,13 @@ class ObjectDetector:
         return annotated_frame, detections
 
     def save_capture(self, frame, filename):
-        """Save a frame to the captures folder and return its path."""
+        # Image saving is disabled by default for this project.
+        # Set Config.SAVE_DETECTION_IMAGES = True if you explicitly want it enabled.
+        if not getattr(Config, "SAVE_DETECTION_IMAGES", False):
+            logger.info("Capture image saving is disabled; no image was written.")
+            return ""
+
+        # """Save a frame to the captures folder and return its path.
         Config.CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
         filepath = Config.CAPTURES_DIR / filename
         if not cv2.imwrite(str(filepath), frame):

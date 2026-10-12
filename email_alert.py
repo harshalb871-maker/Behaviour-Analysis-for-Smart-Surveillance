@@ -53,7 +53,7 @@ def send_alert_email(subject, body, image_path=None, receiver=None):
 
 
 class AlertSystem:
-    """Save evidence and send email on a worker thread without blocking Tkinter."""
+    """Send text-only email alerts on a worker thread without blocking Tkinter."""
 
     def __init__(self, cooldown=10, alert_folder=None):
         Config.ensure_directories()
@@ -84,34 +84,23 @@ class AlertSystem:
             # Reserve this class's cooldown before starting a worker, avoiding duplicates.
             self.last_alert_time[class_name] = now
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        # Images are intentionally not saved for alerts. The frame argument is
+        # retained for compatibility with existing GUI/detection calls.
         safe_class = "".join(
             char if char.isalnum() or char in "-_" else "_" for char in class_name
         ) or "detection"
-        image_path = self.alert_folder / f"{safe_class}_{timestamp}.jpg"
-
-        try:
-            saved = cv2.imwrite(str(image_path), frame)
-        except Exception:
-            saved = False
-            logger.exception("Could not save alert evidence.")
-
-        if not saved:
-            with self.lock:
-                self.last_alert_time.pop(class_name, None)
-            return False, "Could not save evidence image."
 
         worker = threading.Thread(
             target=self._send_in_background,
-            args=(recipient.strip(), class_name, float(confidence), str(image_path)),
+            args=(recipient.strip(), class_name, float(confidence), None),
             daemon=True,
             name=f"EmailAlert-{safe_class}",
         )
         worker.start()
-        logger.info("Alert queued: class=%s confidence=%.2f image=%s", class_name, confidence, image_path)
-        return True, f"Alert queued for {class_name}; evidence saved."
+        logger.info("Alert queued without saving an image: class=%s confidence=%.2f", class_name, confidence)
+        return True, f"Alert queued for {class_name}; no image was saved."
 
-    def _send_in_background(self, recipient, class_name, confidence, image_path):
+    def _send_in_background(self, recipient, class_name, confidence, image_path=None):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         subject = f"Surveillance Alert: {class_name}"
         body = (
@@ -119,7 +108,7 @@ class AlertSystem:
             f"Class: {class_name}\n"
             f"Confidence: {confidence:.2%}\n"
             f"Time: {timestamp}\n\n"
-            "The annotated evidence frame is attached. Review it before taking action."
+            "No image was saved or attached. Review the live application before taking action."
         )
         if not send_alert_email(subject, body, image_path, receiver=recipient):
             logger.error("Alert email delivery failed for class '%s'.", class_name)
