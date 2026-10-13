@@ -17,7 +17,7 @@ else:
 
 
 class ObjectDetector:
-    # """YOLO detector that returns an annotated frame and generic detections."""
+    # YOLO detector that returns an annotated frame and generic detections.
 
     def __init__(self, model_path=None):
         self.model_path = Path(Config.MODEL_PATH if model_path is None else model_path)

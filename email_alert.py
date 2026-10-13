@@ -1,4 +1,4 @@
-# """Email alerts with evidence images and a per-class cooldown."""
+# Email alerts with evidence images and a per-class cooldown.
 
 import smtplib
 import threading
@@ -15,9 +15,9 @@ from logger import logger
 
 def send_alert_email(subject, body, image_path=None, receiver=None):
     """Send an email using .env credentials; return True only on success."""
-    sender = Config.EMAIL_SENDER
-    password = Config.EMAIL_PASSWORD
-    recipient = (receiver or Config.EMAIL_RECEIVER).strip()
+    sender = (Config.EMAIL_SENDER or "").strip()
+    password = (Config.EMAIL_PASSWORD or "").strip().replace(" ", "")
+    recipient = (receiver or Config.EMAIL_RECEIVER or "").strip()
 
     if not sender or not password or not recipient:
         logger.warning("Email not sent: sender, app password, or recipient is missing.")
@@ -41,8 +41,12 @@ def send_alert_email(subject, body, image_path=None, receiver=None):
             )
 
     try:
-        # Gmail requires an app password when 2-Step Verification is enabled.
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
+        # Gmail requires an app password and STARTTLS on port 587 when using a
+        # standard mail client; SMTP_SSL on 587 is not the correct combination.
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
             smtp.login(sender, password)
             smtp.send_message(message)
         logger.info("Alert email sent to %s", recipient)
@@ -53,7 +57,7 @@ def send_alert_email(subject, body, image_path=None, receiver=None):
 
 
 class AlertSystem:
-    """Send text-only email alerts on a worker thread without blocking Tkinter."""
+    # Send text-only email alerts on a worker thread without blocking Tkinter.
 
     def __init__(self, cooldown=10, alert_folder=None):
         Config.ensure_directories()
@@ -65,7 +69,10 @@ class AlertSystem:
 
     @staticmethod
     def email_is_configured(recipient):
-        return bool(Config.EMAIL_SENDER and Config.EMAIL_PASSWORD and recipient and recipient.strip())
+        sender = (Config.EMAIL_SENDER or "").strip()
+        password = (Config.EMAIL_PASSWORD or "").strip().replace(" ", "")
+        recipient_value = (recipient or "").strip()
+        return bool(sender and password and recipient_value)
 
     def trigger_alert(self, recipient, class_name, confidence, frame):
         """Save evidence and queue an email; return immediately with a status."""
