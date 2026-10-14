@@ -1,8 +1,8 @@
-# """Load a custom YOLO model and analyze individual OpenCV frames."""
-
-import cv2
+"""Multi-model YOLO detector for weapon, fighting, and running detection."""
 
 from pathlib import Path
+
+import cv2
 
 from config import Config
 from logger import logger
@@ -17,102 +17,157 @@ else:
 
 
 class ObjectDetector:
-    # YOLO detector that returns an annotated frame and generic detections.
+    """Run separate YOLO models on one frame and combine their detections."""
 
-    def __init__(self, model_path=None):
-        self.model_path = Path(Config.MODEL_PATH if model_path is None else model_path)
-        self.model = None
-        self.load_error = None
-        self._load_model()
+    def __init__(self, model_path=None, fighting_model_path=None, running_model_path=None):
+        base_dir = Path(__file__).resolve().parent
+        models_dir = base_dir / "models"
+
+        # Keep the existing Config.MODEL_PATH as the weapon model path by default.
+        self.model_paths = {
+            "weapon": Path(model_path) if model_path else Path(Config.MODEL_PATH),
+            "fighting": Path(fighting_model_path) if fighting_model_path else models_dir / "fighting_model.pt",
+            "running": Path(running_model_path) if running_model_path else models_dir / "running_model.pt",
+        }
+        self.models = {}
+        self.load_errors = {}
+        self._load_models()
 
     @property
     def is_ready(self):
-        return self.model is not None
+        """True when at least one model loaded successfully."""
+        return bool(self.models)
+
+    @property
+    def load_error(self):
+        """Compatibility property for code that expects a single load_error."""
+        if not self.load_errors:
+            return None
+        return "; ".join(f"{name}: {error}" for name, error in self.load_errors.items())
 
     @property
     def class_names(self):
-        # Return class names supplied by the loaded model, without assumptions.
-        if self.model is None:
-            return []
-        names = self.model.names
-        if isinstance(names, dict):
-            return [str(name) for _, name in sorted(names.items())]
-        return [str(name) for name in names]
+        """Return unique class names from all loaded models."""
+        names = []
+        for model in self.models.values():
+            model_names = model.names
+            values = model_names.values() if isinstance(model_names, dict) else model_names
+            for name in values:
+                text = str(name)
+                if text not in names:
+                    names.append(text)
+        return names
 
-    def _load_model(self):
+    def _load_models(self):
         if YOLO is None:
-            self.load_error = (
-                # The Ultralytics package is not installed. Run: pip install -r requirements.txt"
-            )
-            logger.error("%s (%s)", self.load_error, _YOLO_IMPORT_ERROR)
+            message = f"Ultralytics is not installed: {_YOLO_IMPORT_ERROR}"
+            self.load_errors["ultralytics"] = message
+            logger.error(message)
             return
 
-        if not self.model_path.is_file():
-            self.load_error = (
-                f"Model file was not found: {self.model_path}. "
-                "Place your custom weights at models/best.pt."
-            )
-            logger.error(self.load_error)
-            return
-
-        try:
-            self.model = YOLO(str(self.model_path))
-            logger.info("YOLO model loaded: %s", self.model_path)
-            logger.info("Model class names: %s", self.class_names)
-        except Exception as error:
-            self.load_error = f"Could not load YOLO model: {error}"
-            self.model = None
-            logger.exception(self.load_error)
-
-    def process_frame(self, frame, confidence=0.70):
-        #Return (annotated_frame, detections) for one BGR frame.
-
-       # Each detection dictionary has: class, confidence, and box.
-        #Confidence is a value from 0.0 to 1.0.
-        
-        if frame is None:
-            raise ValueError("The input frame is empty.")
-        if self.model is None:
-            raise RuntimeError(self.load_error or "The YOLO model is not ready.")
-
-        confidence = float(confidence)
-        confidence = max(0.0, min(1.0, confidence))
-        results = self.model.predict(
-            source=frame,
-            conf=confidence,
-            verbose=False,
-        )
-        detections = []
-        annotated_frame = frame.copy()
-
-        for result in results:
-            annotated_frame = result.plot()
-            if result.boxes is None:
+        for model_type, model_path in self.model_paths.items():
+            if not model_path.is_file():
+                message = f"Model file not found: {model_path}"
+                self.load_errors[model_type] = message
+                logger.warning(message)
                 continue
 
-            for box in result.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                score = float(box.conf[0].item())
-                class_id = int(box.cls[0].item())
-                names = self.model.names
-                class_name = names.get(class_id, str(class_id)) if isinstance(names, dict) else names[class_id]
+            try:
+                self.models[model_type] = YOLO(str(model_path))
+                logger.info(
+                    "Loaded %s model: %s; classes=%s",
+                    model_type,
+                    model_path,
+                    self._names_for_model(self.models[model_type]),
+                )
+            except Exception as error:
+                self.load_errors[model_type] = str(error)
+                logger.exception("Could not load %s model: %s", model_type, error)
 
-                detections.append({
-                    "class": str(class_name),
-                    "confidence": score,
-                    "box": (x1, y1, x2, y2),
-                })
+        if not self.models:
+            logger.error("No YOLO models loaded. Check the model paths in models/ and config.py.")
+
+    @staticmethod
+    def _names_for_model(model):
+        names = model.names
+        if isinstance(names, dict):
+            return [str(value) for _, value in sorted(names.items())]
+        return [str(value) for value in names]
+
+    @staticmethod
+    def _class_name(model, class_id):
+        names = model.names
+        if isinstance(names, dict):
+            return str(names.get(class_id, class_id))
+        if 0 <= class_id < len(names):
+            return str(names[class_id])
+        return str(class_id)
+
+    def process_frame(self, frame, confidence=0.70):
+        """Return (annotated_frame, detections); each detection has class/confidence/box/model."""
+        if frame is None:
+            raise ValueError("The input frame is empty.")
+        if not self.models:
+            raise RuntimeError(self.load_error or "No YOLO models are ready.")
+
+        confidence = max(0.0, min(1.0, float(confidence)))
+        annotated_frame = frame.copy()
+        detections = []
+
+        # Draw each model's detections onto the same frame so boxes from earlier models remain.
+        colors = {
+            "weapon": (0, 0, 255),      # red
+            "fighting": (0, 165, 255),  # orange
+            "running": (255, 0, 0),     # blue
+        }
+
+        for model_type, model in self.models.items():
+            try:
+                results = model.predict(source=frame, conf=confidence, verbose=False)
+            except Exception:
+                logger.exception("Prediction failed for %s model", model_type)
+                continue
+
+            for result in results:
+                if result.boxes is None:
+                    continue
+
+                for box in result.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                    score = float(box.conf[0].item())
+                    class_id = int(box.cls[0].item())
+                    class_name = self._class_name(model, class_id)
+                    label = f"{model_type}: {class_name} {score:.2f}"
+                    color = colors.get(model_type, (0, 255, 0))
+
+                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+                    text_y = max(20, y1 - 8)
+                    cv2.putText(
+                        annotated_frame,
+                        label,
+                        (x1, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        color,
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                    detections.append({
+                        "class": class_name,
+                        "confidence": score,
+                        "box": (x1, y1, x2, y2),
+                        "model": model_type,
+                    })
 
         return annotated_frame, detections
 
     def save_capture(self, frame, filename):
-        # Image saving is disabled by default for this project.
-        # Set Config.SAVE_DETECTION_IMAGES = True if you explicitly want it enabled.
+        """Save a frame only when Config.SAVE_DETECTION_IMAGES is enabled."""
         if not getattr(Config, "SAVE_DETECTION_IMAGES", False):
             logger.info("Capture image saving is disabled; no image was written.")
             return ""
 
-        # """Save a frame to the captures folder and return its path.
         Config.CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
         filepath = Config.CAPTURES_DIR / filename
         if not cv2.imwrite(str(filepath), frame):

@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['Running']
+
+roboflow:
+  workspace: harshal-badgujar
+  project: person-running-lsgbp
+  version: 1
+  license: CC BY 4.0
+  url: https://app.roboflow.com/harshal-badgujar/person-running-lsgbp/1

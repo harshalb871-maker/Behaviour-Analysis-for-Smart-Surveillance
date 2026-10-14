@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['fight']
+
+roboflow:
+  workspace: harshal-badgujar
+  project: fighting-bwhwq-4e5vo
+  version: 1
+  license: CC BY 4.0
+  url: https://app.roboflow.com/harshal-badgujar/fighting-bwhwq-4e5vo/1
