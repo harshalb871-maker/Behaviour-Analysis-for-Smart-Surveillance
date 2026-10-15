@@ -21,6 +21,8 @@ This is a boilerplate application for running a real-time object detection syste
 
 ## Running the App
 
+.\.venv\Scripts\Activate.ps1
+
 ```bash
 python main.py
 ```
