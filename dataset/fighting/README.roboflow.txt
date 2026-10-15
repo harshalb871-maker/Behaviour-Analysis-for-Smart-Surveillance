@@ -1,8 +1,8 @@
 
-fighting - v1 2026-10-14 12:57am
+fight detection - v1 2026-10-14 4:53pm
 ==============================
 
-This dataset was exported via roboflow.com on October 13, 2026 at 7:28 PM GMT
+This dataset was exported via roboflow.com on October 14, 2026 at 11:25 AM GMT
 
 Roboflow is an end-to-end computer vision platform that helps you
 * collaborate with your team on computer vision projects
@@ -17,8 +17,8 @@ visit https://github.com/roboflow/notebooks
 
 To find over 100k other datasets and pre-trained models, visit https://universe.roboflow.com
 
-The dataset includes 30 images.
-Fight are annotated in YOLOv8 format.
+The dataset includes 254 images.
+Violence are annotated in YOLOv8 format.
 
 The following pre-processing was applied to each image:
 * Auto-orientation of pixel data (with EXIF-orientation stripping)

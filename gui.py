@@ -409,12 +409,20 @@ class AppGUI:
         self.video_label.image = self._photo
 
     def _update_detection_status(self, detections):
-        labels = sorted({str(item.get("class", "unknown")) for item in detections})
+        # Show both the predicted class and which independent model produced it.
         count = len(detections)
-        self.detection_badge.configure(text=f"DETECTIONS: {count}", bg="#b93d3d" if count else "#5e7182")
-        if labels:
-            self.detection_summary.set(", ".join(labels))
-            self.status.set(f"Detected {count} object(s)")
+        self.detection_badge.configure(
+            text=f"DETECTIONS: {count}",
+            bg="#b93d3d" if count else "#5e7182",
+        )
+
+        model_labels = sorted({
+            f"{item.get('model', 'model')}:{item.get('class', 'unknown')}"
+            for item in detections
+        })
+        if model_labels:
+            self.detection_summary.set(", ".join(model_labels))
+            self.status.set(f"Detected {count} prediction(s)")
             self.status_label.configure(fg="#ff7770")
         else:
             self.detection_summary.set("No detections in the latest frame")

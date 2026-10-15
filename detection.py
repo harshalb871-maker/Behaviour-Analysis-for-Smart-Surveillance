@@ -1,4 +1,4 @@
-"""Multi-model YOLO detector for weapon, fighting, and running detection."""
+"""Multi-model YOLO detector including the Security Activity model."""
 
 from pathlib import Path
 
@@ -19,7 +19,7 @@ else:
 class ObjectDetector:
     """Run separate YOLO models on one frame and combine their detections."""
 
-    def __init__(self, model_path=None, fighting_model_path=None, running_model_path=None):
+    def __init__(self, model_path=None, fighting_model_path=None, running_model_path=None, security_activity_model_path=None):
         base_dir = Path(__file__).resolve().parent
         models_dir = base_dir / "models"
 
@@ -28,6 +28,8 @@ class ObjectDetector:
             "weapon": Path(model_path) if model_path else Path(Config.MODEL_PATH),
             "fighting": Path(fighting_model_path) if fighting_model_path else models_dir / "fighting_model.pt",
             "running": Path(running_model_path) if running_model_path else models_dir / "running_model.pt",
+            # Six-class model: fight, knife, pistol, running, standing, walking.
+            "security_activity": Path(security_activity_model_path) if security_activity_model_path else models_dir / "security_activity_model.pt",
         }
         self.models = {}
         self.load_errors = {}
@@ -114,16 +116,31 @@ class ObjectDetector:
         annotated_frame = frame.copy()
         detections = []
 
+        # The GUI slider is the base threshold. Running often fires on action
+        # scenes that are not running, so require a higher score for that model.
+        # This reduces false positives but does not replace better training data.
+        model_thresholds = {
+            "weapon": confidence,
+            "fighting": confidence,
+            "running": max(confidence, 0.75),
+            "security_activity": confidence,
+        }
+
         # Draw each model's detections onto the same frame so boxes from earlier models remain.
         colors = {
             "weapon": (0, 0, 255),      # red
             "fighting": (0, 165, 255),  # orange
             "running": (255, 0, 0),     # blue
+            "security_activity": (0, 255, 0),  # green
         }
 
         for model_type, model in self.models.items():
             try:
-                results = model.predict(source=frame, conf=confidence, verbose=False)
+                results = model.predict(
+                    source=frame,
+                    conf=model_thresholds.get(model_type, confidence),
+                    verbose=False,
+                )
             except Exception:
                 logger.exception("Prediction failed for %s model", model_type)
                 continue
@@ -141,13 +158,14 @@ class ObjectDetector:
                     color = colors.get(model_type, (0, 255, 0))
 
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                    text_y = max(20, y1 - 8)
+                    text_y = max(22, y1 - 8)
+                    text_x = max(4, min(x1, annotated_frame.shape[1] - 180))
                     cv2.putText(
                         annotated_frame,
                         label,
-                        (x1, text_y),
+                        (text_x, text_y),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
+                        0.60,   # Keep labels readable without covering the scene
                         color,
                         2,
                         cv2.LINE_AA,

@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 6
+names: ['fight', 'knife', 'pistol', 'running', 'standing', 'walking']
+
+roboflow:
+  workspace: demos-workspace-e0ajl
+  project: security-activity-dataset
+  version: 1
+  license: Private
+  url: https://app.roboflow.com/demos-workspace-e0ajl/security-activity-dataset/1

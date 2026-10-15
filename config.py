@@ -23,6 +23,7 @@ class Config:
 
     # Place your custom Ultralytics YOLO weights at models/best.pt.
     MODEL_PATH = MODELS_DIR / "best.pt"
+   
 
     EMAIL_SENDER = os.getenv("EMAIL_SENDER", "").strip()
     EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "").strip().replace(" ", "")
