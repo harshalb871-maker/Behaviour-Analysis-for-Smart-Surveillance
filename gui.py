@@ -14,6 +14,10 @@ from detection import ObjectDetector
 from email_alert import AlertSystem
 from logger import logger
 
+# Speed settings -------------------------------------------------------
+DETECT_EVERY_N_FRAMES = 5   # 1 = har frame, 3 = har 3rd frame par detection
+MAX_FRAME_WIDTH = 960       # isse badi frame chhoti kar di jayegi
+
 
 class AppGUI:
     BG = "#24384a"
@@ -287,6 +291,7 @@ class AppGUI:
                 return
 
             frame_count = 0
+            last_detections = []
             self._publish_message(("started", "Video source opened."))
             while not stop_event.is_set():
                 ok, frame = capture.read()
@@ -295,20 +300,40 @@ class AppGUI:
                         self._publish_message(("ended", "Video ended or a frame could not be read."))
                     break
 
-                annotated, detections = self.detector.process_frame(frame, self.confidence_threshold)
-                frame_count += 1
+                # Badi frame ko pehle hi chhota karo (inference + display dono tez).
+                h, w = frame.shape[:2]
+                if w > MAX_FRAME_WIDTH:
+                    frame = cv2.resize(frame, (MAX_FRAME_WIDTH, int(h * MAX_FRAME_WIDTH / w)))
 
-                # Generic by design: use the class names actually supplied by best.pt.
-                if AlertSystem.email_is_configured(self.receiver_email_value):
-                    for detection in detections:
-                        success, result_message = self.alert_system.trigger_alert(
-                            self.receiver_email_value,
-                            detection["class"],
-                            detection["confidence"],
-                            annotated,
-                        )
-                        if success:
-                            self._publish_message(("alert", result_message))
+                frame_count += 1
+                run_detection = (frame_count % DETECT_EVERY_N_FRAMES == 0) or frame_count == 1
+
+                if run_detection:
+                    annotated, detections = self.detector.process_frame(frame, self.confidence_threshold)
+                    last_detections = detections
+
+                    # Generic by design: use the class names actually supplied by the model.
+                    if AlertSystem.email_is_configured(self.receiver_email_value):
+                        for detection in detections:
+                            success, result_message = self.alert_system.trigger_alert(
+                                self.receiver_email_value,
+                                detection["class"],
+                                detection["confidence"],
+                                annotated,
+                            )
+                            if success:
+                                self._publish_message(("alert", result_message))
+                else:
+                    # Detection skip hui: purane boxes naye frame par draw karo.
+                    detections = last_detections
+                    annotated = frame.copy()
+                    for item in detections:
+                        x1, y1, x2, y2 = item["box"]
+                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(annotated, f"{item['class']} {item['confidence']:.2f}",
+                                    (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.60, (0, 255, 0), 2, cv2.LINE_AA)
+
                 self._publish_message(("frame", annotated, detections, frame_count))
         except Exception as error:
             logger.exception("Detection worker failed.")
@@ -402,7 +427,7 @@ class AppGUI:
         image = Image.fromarray(rgb)
         max_width = max(self.video_label.winfo_width(), 320)
         max_height = max(self.video_label.winfo_height(), 220)
-        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        resampling = getattr(Image, "Resampling", Image).BILINEAR
         image.thumbnail((max_width, max_height), resampling)
         self._photo = ImageTk.PhotoImage(image=image)
         self.video_label.configure(image=self._photo, text="")

@@ -1,12 +1,5 @@
-# Safe email alerts for a smart surveillance system.
-# - Credentials loaded from environment only (never hardcoded)
-# - Per-class cooldown + global rate limiting (anti-spam / anti-DoS)
-# - Attachment path restricted to the alerts directory (no path traversal)
-# - Input sanitization to prevent header injection
-# - TLS enforced, timeouts, size caps on attachments
-# - Non-blocking worker threads; thread-safe cooldown tracking
-
 import os
+import queue
 import re
 import smtplib
 import ssl
@@ -39,6 +32,15 @@ _SAFE_CLASS_RE = re.compile(r"[^A-Za-z0-9 _\-]")
 
 # Simple RFC-5322-ish email check (defense in depth; not a full validator).
 _EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+
+# Email bhejne ki koshish kitni baar karni hai aur har koshish ke beech kitna wait.
+_SEND_RETRIES = 3
+_RETRY_DELAY = 2.0
+
+# In classes ke liye email nahi jayega (harmless activity). Isse email queue
+# kaam ki alerts (fight, knife, pistol, running) ke liye free rehti hai.
+# Sab classes par email chahiye to isse khali set() kar do.
+IGNORED_ALERT_CLASSES = {"standing", "walking"}
 
 # Per-process global rate limit: max emails per rolling 60 seconds.
 _GLOBAL_RATE_LIMIT = 30
@@ -112,12 +114,10 @@ def _resolve_safe_image(image_path, base_dir: Path) -> Path | None:
 
 # ----------------------------- Email sender ---------------------------
 
-def send_alert_email(subject, body, image_path=None, receiver=None):
+def _prepare_message(subject, body, image_path=None, receiver=None):
     """
-    Send an alert email. Returns True only on confirmed success.
-
-    All inputs are validated/sanitized before use. Credentials come from
-    Config (which should read from the environment/.env).
+    Validate credentials and build the EmailMessage.
+    Returns (message, sender, password, recipient) or None if not sendable.
     """
     # --- Credentials -------------------------------------------------
     sender = (Config.EMAIL_SENDER or "").strip()
@@ -126,11 +126,11 @@ def send_alert_email(subject, body, image_path=None, receiver=None):
 
     if not sender or not password or not recipient:
         logger.warning("Email not sent: missing sender, password, or recipient.")
-        return False
+        return None
 
     if not _is_valid_email(sender) or not _is_valid_email(recipient):
         logger.warning("Email not sent: invalid sender or recipient format.")
-        return False
+        return None
 
     # --- Message construction ---------------------------------------
     message = EmailMessage()
@@ -160,6 +160,21 @@ def send_alert_email(subject, body, image_path=None, receiver=None):
             except OSError:
                 logger.exception("Failed to read attachment: %s", safe_path)
 
+    return message, sender, password, recipient
+
+
+def send_alert_email(subject, body, image_path=None, receiver=None):
+    """
+    Send an alert email. Returns True only on confirmed success.
+
+    All inputs are validated/sanitized before use. Credentials come from
+    Config (which should read from the environment/.env).
+    """
+    prepared = _prepare_message(subject, body, image_path, receiver)
+    if prepared is None:
+        return False
+    message, sender, password, recipient = prepared
+
     # --- Transport ---------------------------------------------------
     try:
         context = ssl.create_default_context()
@@ -183,6 +198,57 @@ def send_alert_email(subject, body, image_path=None, receiver=None):
         return False
 
 
+# ----------------------------- SMTP session ---------------------------
+
+class _SmtpSession:
+    """
+    Ek hi Gmail SMTP connection ko baar-baar use karta hai (har email par naya
+    connect + TLS + login nahi). Connection toote ya idle timeout ho to apne
+    aap dobara connect ho jata hai. Sirf worker thread se use hota hai.
+    """
+
+    def __init__(self):
+        self._smtp = None
+
+    def close(self):
+        smtp, self._smtp = self._smtp, None
+        if smtp is None:
+            return
+        try:
+            smtp.quit()
+        except Exception:
+            try:
+                smtp.close()
+            except Exception:
+                pass
+
+    def _connect(self, sender, password):
+        smtp = smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=_SMTP_TIMEOUT)
+        try:
+            smtp.ehlo()
+            smtp.starttls(context=ssl.create_default_context())
+            smtp.ehlo()
+            smtp.login(sender, password)
+        except Exception:
+            try:
+                smtp.close()
+            except Exception:
+                pass
+            raise
+        self._smtp = smtp
+
+    def send(self, message, sender, password):
+        if self._smtp is not None:
+            try:
+                self._smtp.noop()  # connection abhi zinda hai?
+                self._smtp.send_message(message)
+                return
+            except (smtplib.SMTPException, OSError):
+                self.close()  # purana connection mar chuka; neeche naya banega
+        self._connect(sender, password)
+        self._smtp.send_message(message)
+
+
 # ----------------------------- Alert system ---------------------------
 
 class AlertSystem:
@@ -191,7 +257,10 @@ class AlertSystem:
 
     - One cooldown per detected class.
     - One global rolling-window cap to protect against runaway alerts.
-    - Emails are dispatched on daemon worker threads (non-blocking UI).
+    - Ek hi background worker emails ek-ek karke bhejta hai (queue se), taaki
+      Gmail par ek saath kai login na hon. Fail hone par retry hota hai.
+    - Email fail ho jaye to us class ka cooldown hata diya jata hai, taaki agli
+      detection par dobara koshish ho.
     """
 
     def __init__(self, cooldown=10, alert_folder=None):
@@ -207,6 +276,14 @@ class AlertSystem:
 
         # Rolling-window global rate limiter.
         self._recent_sends: list[float] = []
+
+        # Single worker + bounded queue.
+        self._queue: "queue.Queue[dict]" = queue.Queue(maxsize=20)
+        self._session = _SmtpSession()
+        self._worker = threading.Thread(
+            target=self._worker_loop, daemon=True, name="EmailAlertWorker"
+        )
+        self._worker.start()
 
     # -------- configuration check --------
     @staticmethod
@@ -230,6 +307,10 @@ class AlertSystem:
         self._recent_sends = [t for t in self._recent_sends if t >= cutoff]
         return len(self._recent_sends) < _GLOBAL_RATE_LIMIT
 
+    def _release_cooldown(self, key: str):
+        with self.lock:
+            self.last_alert_time.pop(key, None)
+
     # -------- public entry point --------
     def trigger_alert(self, recipient, class_name, confidence, frame=None):
         """
@@ -246,10 +327,15 @@ class AlertSystem:
             return False, "Invalid confidence value."
 
         safe_class = _sanitize_class_name(class_name)
+        if safe_class.lower() in IGNORED_ALERT_CLASSES:
+            return False, f"Class '{safe_class}' is ignored for email alerts."
+
+        # "Running" aur "running" ko ek hi class maano (cooldown key lowercase).
+        key = safe_class.lower()
         now = time.monotonic()
 
         with self.lock:
-            previous = self.last_alert_time.get(safe_class)
+            previous = self.last_alert_time.get(key)
             if previous is not None and (now - previous) < self.cooldown:
                 remaining = self.cooldown - (now - previous)
                 return False, f"Cooldown active ({remaining:.1f}s remaining)."
@@ -257,36 +343,98 @@ class AlertSystem:
             if not self._global_rate_ok_locked():
                 return False, "Global alert rate limit reached; try again shortly."
 
-            # Reserve the slot before starting the worker.
-            self.last_alert_time[safe_class] = now
+            # Reserve the slot before queueing.
+            self.last_alert_time[key] = now
             self._recent_sends.append(now)
 
-        worker = threading.Thread(
-            target=self._send_in_background,
-            args=(recipient.strip(), safe_class, confidence),
-            daemon=True,
-            name=f"EmailAlert-{safe_class}",
-        )
-        worker.start()
+        job = {
+            "recipient": recipient.strip(),
+            "class_name": safe_class,
+            "key": key,
+            "confidence": confidence,
+            # Detection ka asli time (email mein yahi dikhega, bhejne ka nahi).
+            "detected_at": datetime.now(timezone.utc),
+            "queued_mono": now,
+        }
+        try:
+            self._queue.put_nowait(job)
+        except queue.Full:
+            self._release_cooldown(key)
+            logger.warning("Alert queue full; dropped alert for '%s'.", safe_class)
+            return False, "Alert queue is full; email skipped."
+
         logger.info(
-            "Alert queued: class=%s confidence=%.2f recipient=%s",
+            "Alert queued: class=%s confidence=%.2f recipient=%s (queue size ~%d)",
             safe_class,
             confidence,
-            recipient.strip(),
+            job["recipient"],
+            self._queue.qsize(),
         )
         return True, f"Alert queued for {safe_class}."
 
     # -------- worker --------
-    def _send_in_background(self, recipient, class_name, confidence):
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    def _worker_loop(self):
+        while True:
+            job = self._queue.get()
+            try:
+                self._deliver(job)
+            except Exception:
+                logger.exception("Unexpected error in email worker.")
+                self._release_cooldown(job["key"])
+            finally:
+                self._queue.task_done()
+
+    def _send_once(self, subject, body, recipient):
+        prepared = _prepare_message(subject, body, None, recipient)
+        if prepared is None:
+            return False
+        message, sender, password, _ = prepared
+        try:
+            self._session.send(message, sender, password)
+            logger.info("Alert email sent to %s", recipient)
+            return True
+        except smtplib.SMTPAuthenticationError:
+            logger.error("SMTP authentication failed. Check EMAIL_PASSWORD (app password).")
+        except (smtplib.SMTPException, ssl.SSLError, OSError):
+            logger.exception("Failed to send alert email.")
+        except Exception:
+            logger.exception("Unexpected error sending alert email.")
+        self._session.close()
+        return False
+
+    def _deliver(self, job):
+        class_name = job["class_name"]
+        confidence = job["confidence"]
+        detected = job["detected_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
         subject = f"Surveillance Alert: {class_name}"
         body = (
             "A class recognized by your configured model was detected.\n\n"
             f"Class: {class_name}\n"
             f"Confidence: {confidence:.2%}\n"
-            f"Time: {timestamp}\n\n"
+            f"Detected at: {detected}\n\n"
             "Review the live application before taking action.\n"
             "This is an automated message; do not reply.\n"
         )
-        if not send_alert_email(subject, body, image_path=None, receiver=recipient):
-            logger.error("Alert email delivery failed for class '%s'.", class_name)
+
+        for attempt in range(1, _SEND_RETRIES + 1):
+            started = time.monotonic()
+            ok = self._send_once(subject, body, job["recipient"])
+            if ok:
+                logger.info(
+                    "Alert email for '%s' delivered to SMTP in %.1fs (%.1fs after detection, attempt %d).",
+                    class_name,
+                    time.monotonic() - started,
+                    time.monotonic() - job["queued_mono"],
+                    attempt,
+                )
+                return
+            if attempt < _SEND_RETRIES:
+                logger.warning(
+                    "Alert email for '%s' failed (attempt %d/%d); retrying in %.0fs.",
+                    class_name, attempt, _SEND_RETRIES, _RETRY_DELAY,
+                )
+                time.sleep(_RETRY_DELAY)
+
+        logger.error("Alert email delivery failed for class '%s' after %d attempts.", class_name, _SEND_RETRIES)
+        # Agli detection par dobara koshish ho sake.
+        self._release_cooldown(job["key"])

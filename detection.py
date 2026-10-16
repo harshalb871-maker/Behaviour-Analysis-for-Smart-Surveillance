@@ -8,6 +8,23 @@ from config import Config
 from logger import logger
 
 try:
+    import torch
+    USE_GPU = torch.cuda.is_available()
+except ImportError:
+    torch = None
+    USE_GPU = False
+
+# Speed settings -------------------------------------------------------
+# Sirf wahi models chalenge jo is list mein hain. Har extra model = har frame par
+# ek extra inference = video slow. security_activity model already fight, knife,
+# pistol, running, standing, walking cover karta hai.
+# Sab models chahiye to: ["weapon", "fighting", "running", "security_activity"]
+ENABLED_MODELS = ["weapon","running","fighting","security_activity"]
+
+# Chhota imgsz = tez (320/416/480/640). Accuracy kam lage to 480 ya 640 karo.
+INFER_IMGSZ = 320
+
+try:
     from ultralytics import YOLO
 except ImportError as import_error:
     YOLO = None
@@ -33,6 +50,8 @@ class ObjectDetector:
         }
         self.models = {}
         self.load_errors = {}
+        self.device = 0 if USE_GPU else "cpu"
+        logger.info("Inference device: %s", "GPU (CUDA)" if USE_GPU else "CPU")
         self._load_models()
 
     @property
@@ -68,6 +87,8 @@ class ObjectDetector:
             return
 
         for model_type, model_path in self.model_paths.items():
+            if model_type not in ENABLED_MODELS:
+                continue
             if not model_path.is_file():
                 message = f"Model file not found: {model_path}"
                 self.load_errors[model_type] = message
@@ -139,6 +160,9 @@ class ObjectDetector:
                 results = model.predict(
                     source=frame,
                     conf=model_thresholds.get(model_type, confidence),
+                    imgsz=INFER_IMGSZ,
+                    device=self.device,
+                    half=USE_GPU,
                     verbose=False,
                 )
             except Exception:
