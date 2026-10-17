@@ -9,6 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 from PIL import Image, ImageTk
 
+import database
 from config import Config
 from detection import ObjectDetector
 from email_alert import AlertSystem
@@ -17,6 +18,11 @@ from logger import logger
 # Speed settings -------------------------------------------------------
 DETECT_EVERY_N_FRAMES = 5   # 1 = har frame, 3 = har 3rd frame par detection
 MAX_FRAME_WIDTH = 960       # isse badi frame chhoti kar di jayegi
+
+# Database settings ----------------------------------------------------
+SAVE_COOLDOWN_SEC = 10      # ek class ka dobara record itne second baad
+# In classes ka record database mein save nahi hoga (harmless / normal activity).
+DB_IGNORED_CLASSES = {"standing", "walking", "normal person", "person"}
 
 
 class AppGUI:
@@ -37,6 +43,10 @@ class AppGUI:
 
         self.detector = ObjectDetector()
         self.alert_system = AlertSystem(cooldown=10)
+        try:
+            database.init_db()
+        except Exception:
+            logger.exception("Could not initialise the database.")
         self.confidence_threshold = 0.70
         self.cooldown_seconds = 10
         self.receiver_email_value = Config.EMAIL_RECEIVER
@@ -275,6 +285,32 @@ class AppGUI:
         self.worker_thread.start()
         self.log("Detection worker started.")
 
+    def _save_alert_record(self, detection, frame, source_label, last_saved):
+        """Detection ko database + snapshot image mein save karo. Fail ho to app na ruke."""
+        key = str(detection["class"]).lower()
+        if key in DB_IGNORED_CLASSES:
+            return
+        now = time.monotonic()
+        if now - last_saved.get(key, -1e9) < SAVE_COOLDOWN_SEC:
+            return
+        last_saved[key] = now
+        try:
+            Config.CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+            safe_name = "".join(ch if ch.isalnum() else "_" for ch in key)
+            image_path = Config.CAPTURES_DIR / f"{safe_name}_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+            if not cv2.imwrite(str(image_path), frame):
+                image_path = None
+            database.save_alert(
+                detection["class"],
+                detection["confidence"],
+                model=detection.get("model"),
+                track_id=detection.get("track_id"),
+                source=source_label,
+                image_path=str(image_path) if image_path else None,
+            )
+        except Exception:
+            logger.exception("Could not save alert to the database.")
+
     def _capture_loop(self, source, stop_event):
         capture = None
         try:
@@ -292,6 +328,8 @@ class AppGUI:
 
             frame_count = 0
             last_detections = []
+            last_saved = {}
+            source_label = "camera" if source == 0 else str(source)
             self._publish_message(("started", "Video source opened."))
             while not stop_event.is_set():
                 ok, frame = capture.read()
@@ -311,6 +349,10 @@ class AppGUI:
                 if run_detection:
                     annotated, detections = self.detector.process_frame(frame, self.confidence_threshold)
                     last_detections = detections
+
+                    # Database record (email configure ho ya na ho, hamesha save hota hai).
+                    for detection in detections:
+                        self._save_alert_record(detection, annotated, source_label, last_saved)
 
                     # Generic by design: use the class names actually supplied by the model.
                     if AlertSystem.email_is_configured(self.receiver_email_value):

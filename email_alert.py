@@ -10,6 +10,8 @@ from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 from pathlib import Path
 
+import cv2
+
 from config import Config
 from logger import logger
 
@@ -40,10 +42,14 @@ _RETRY_DELAY = 2.0
 # In classes ke liye email nahi jayega (harmless activity). Isse email queue
 # kaam ki alerts (fight, knife, pistol, running) ke liye free rehti hai.
 # Sab classes par email chahiye to isse khali set() kar do.
-IGNORED_ALERT_CLASSES = {"standing", "walking"}
+IGNORED_ALERT_CLASSES = {"standing", "walking", "normal person", "person"}
 
 # Per-process global rate limit: max emails per rolling 60 seconds.
 _GLOBAL_RATE_LIMIT = 30
+
+# Email ke saath jaane wali snapshot image.
+_JPEG_QUALITY = 85          # 85 par ek frame ~100-200 KB (limit 5 MB hai)
+_KEEP_ALERT_IMAGES = 200    # alerts/ folder mein itni hi latest images rakhi jayengi
 _GLOBAL_RATE_WINDOW = 60.0
 
 
@@ -307,6 +313,33 @@ class AlertSystem:
         self._recent_sends = [t for t in self._recent_sends if t >= cutoff]
         return len(self._recent_sends) < _GLOBAL_RATE_LIMIT
 
+    def _save_snapshot(self, frame, safe_class):
+        """Detection wali frame ko alerts/ folder mein JPEG ke roop mein save karo."""
+        if frame is None:
+            return None
+        try:
+            self.alert_folder.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            name = safe_class.replace(" ", "_")
+            path = self.alert_folder / f"{name}_{stamp}.jpg"
+            if not cv2.imwrite(str(path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), _JPEG_QUALITY]):
+                logger.warning("Could not write alert snapshot: %s", path)
+                return None
+            self._prune_snapshots()
+            return path
+        except Exception:
+            logger.exception("Could not save alert snapshot.")
+            return None
+
+    def _prune_snapshots(self):
+        """Purani images hata do taaki disk na bhare (sirf latest _KEEP_ALERT_IMAGES rakho)."""
+        files = sorted(self.alert_folder.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
+        for old in files[: max(0, len(files) - _KEEP_ALERT_IMAGES)]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
     def _release_cooldown(self, key: str):
         with self.lock:
             self.last_alert_time.pop(key, None)
@@ -347,7 +380,11 @@ class AlertSystem:
             self.last_alert_time[key] = now
             self._recent_sends.append(now)
 
+        # Slot mil chuka hai, to ab hi image save karo (lock ke bahar, taaki GUI na ruke).
+        snapshot = self._save_snapshot(frame, safe_class)
+
         job = {
+            "image_path": str(snapshot) if snapshot else None,
             "recipient": recipient.strip(),
             "class_name": safe_class,
             "key": key,
@@ -384,8 +421,8 @@ class AlertSystem:
             finally:
                 self._queue.task_done()
 
-    def _send_once(self, subject, body, recipient):
-        prepared = _prepare_message(subject, body, None, recipient)
+    def _send_once(self, subject, body, recipient, image_path=None):
+        prepared = _prepare_message(subject, body, image_path, recipient)
         if prepared is None:
             return False
         message, sender, password, _ = prepared
@@ -412,13 +449,14 @@ class AlertSystem:
             f"Class: {class_name}\n"
             f"Confidence: {confidence:.2%}\n"
             f"Detected at: {detected}\n\n"
-            "Review the live application before taking action.\n"
+            + ("A snapshot of the detection is attached.\n\n" if job.get("image_path") else "")
+            + "Review the live application before taking action.\n"
             "This is an automated message; do not reply.\n"
         )
 
         for attempt in range(1, _SEND_RETRIES + 1):
             started = time.monotonic()
-            ok = self._send_once(subject, body, job["recipient"])
+            ok = self._send_once(subject, body, job["recipient"], job.get("image_path"))
             if ok:
                 logger.info(
                     "Alert email for '%s' delivered to SMTP in %.1fs (%.1fs after detection, attempt %d).",

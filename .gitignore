@@ -16,3 +16,7 @@ logs/
 # Virtual environment
 venv/
 .venv/
+
+
+# Captures
+captures/

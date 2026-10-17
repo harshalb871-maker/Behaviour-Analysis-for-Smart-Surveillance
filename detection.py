@@ -19,7 +19,7 @@ except ImportError:
 # ek extra inference = video slow. security_activity model already fight, knife,
 # pistol, running, standing, walking cover karta hai.
 # Sab models chahiye to: ["weapon", "fighting", "running", "security_activity"]
-ENABLED_MODELS = ["weapon","running","fighting","security_activity"]
+ENABLED_MODELS = ["running","fighting","security_activity"]
 
 # Chhota imgsz = tez (320/416/480/640). Accuracy kam lage to 480 ya 640 karo.
 INFER_IMGSZ = 320
